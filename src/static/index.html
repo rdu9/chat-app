@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chat</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="toasts"></div>
+
+<header>
+  <div class="brand">chat</div>
+  <div>
+    <span class="who" id="who"></span>
+    <span id="authbtns">
+      <button class="ghost" onclick="showForm('login')">login</button>
+      <button onclick="showForm('register')">register</button>
+    </span>
+    <button class="ghost hidden" id="logoutbtn" onclick="logout()">logout</button>
+  </div>
+</header>
+
+<!-- ---------- landing ---------- -->
+<div id="landing">
+  <div style="text-align:center">
+    <h1>pick a channel</h1>
+    <p>1 to 1000. create one, or ask to join.</p>
+  </div>
+  <div class="bigbtns">
+    <button onclick="showForm('create')">create</button>
+    <button class="ghost" onclick="showForm('join')">join</button>
+  </div>
+</div>
+
+<!-- ---------- forms ---------- -->
+<div id="formwrap" class="center hidden">
+  <div class="card">
+    <h2 id="formtitle"></h2>
+
+    <div id="f-username" class="hidden"><input id="i-username" placeholder="username"></div>
+    <div id="f-email"    class="hidden"><input id="i-email" placeholder="email"></div>
+    <div id="f-password" class="hidden"><input id="i-password" type="password" placeholder="password"></div>
+
+    <div id="f-number" class="hidden"><input id="i-number" type="number" min="1" max="1000" placeholder="channel number (1-1000)"></div>
+    <div id="f-title"  class="hidden"><input id="i-title" placeholder="channel title"></div>
+    <div id="f-desc"   class="hidden"><input id="i-desc" placeholder="description"></div>
+
+    <div class="err" id="formerr"></div>
+    <button id="formsubmit"></button>
+    <div class="link" onclick="goHome()">back</div>
+  </div>
+</div>
+
+<!-- ---------- app ---------- -->
+<div id="app" class="hidden">
+  <div id="sidebar">
+    <button onclick="showForm('create')">+ create</button>
+    <button class="ghost" onclick="showForm('join')">ask to join</button>
+    <div class="label">your channels</div>
+    <div id="memberlist"></div>
+    <div class="label">pending</div>
+    <div id="pendinglist"></div>
+  </div>
+
+  <div id="main">
+    <div id="chathead">
+      <div>
+        <div class="title" id="chattitle">no channel selected</div>
+        <div class="sub" id="chatsub"></div>
+      </div>
+      <div>
+        <button class="ghost hidden" id="reqbtn" onclick="openRequests()">requests</button>
+        <button class="ghost hidden" id="delbtn" onclick="deleteChannel()">delete</button>
+      </div>
+    </div>
+
+    <div id="log"></div>
+
+    <div id="composer" class="hidden">
+      <textarea id="i-msg" rows="1" placeholder="message — shift+enter for a new line"
+                onkeydown="msgKey(event)" oninput="autoGrow(this)"></textarea>
+      <button onclick="send()">send</button>
+    </div>
+    <div id="readonly" class="hidden">
+      <span>read only — you are not a member of this channel</span>
+      <button class="ghost" onclick="requestCurrent()">ask to join</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------- requests modal ---------- -->
+<div id="modal" class="hidden">
+  <div class="card" style="width:400px">
+    <h2>pending requests</h2>
+    <div id="reqlist"></div>
+    <div class="err" id="reqerr"></div>
+    <button class="ghost" onclick="closeRequests()">close</button>
+  </div>
+</div>
+
+<script>
+/*
+  Auth lives entirely in an httpOnly cookie set by the server.
+  This file never sees, stores, or sends a token — the browser attaches it
+  automatically to every fetch and to the WebSocket handshake.
+*/
+const API = "/api/v1";
+
+/* If your enum still spells it "rolf", rename the key below to match. */
+const EMOJI = { rolf: "🤣", joy: "😂", skull: "💀", heart: "❤️" };
+
+/* Timestamps are stored naive but generated inside the container, which runs
+   UTC. Set this to false if you switch the app to local time. */
+const TIMES_ARE_UTC = true;
+
+let me       = null;   // whatever GET /auth/me returned, or null
+let chats    = {member: [], pending: []};
+let current  = null;   // channel number currently open
+let ws       = null;
+let wsChan   = null;   // channel the socket is actually connected to
+let messages = new Map();   // message_uid -> {reactions: {...}, mine: Set}
+
+/* ---------------- helpers ---------------- */
+
+function $(id) { return document.getElementById(id); }
+
+function escape(s) {
+  return String(s ?? "").replace(/[<>&"]/g, c =>
+    ({"<":"&lt;", ">":"&gt;", "&":"&amp;", '"':"&quot;"}[c]));
+}
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const hasZone = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
+  const d = new Date(TIMES_ARE_UTC && !hasZone ? iso + "Z" : iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+}
+
+function fmtFull(iso) {
+  if (!iso) return "";
+  const hasZone = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
+  const d = new Date(TIMES_ARE_UTC && !hasZone ? iso + "Z" : iso);
+  return isNaN(d) ? "" : d.toLocaleString();
+}
+
+/* ---------------- toasts ---------------- */
+
+function toast(text, ok = true) {
+  const t = document.createElement("div");
+  t.className = "toast " + (ok ? "ok" : "bad");
+  t.textContent = text;
+  $("toasts").appendChild(t);
+  setTimeout(() => { t.classList.add("out"); }, 2600);
+  setTimeout(() => { t.remove(); }, 3000);
+}
+
+/* ---------------- api ---------------- */
+
+async function api(path, {method="GET", body=null} = {}) {
+  const headers = {};
+  if (body) headers["Content-Type"] = "application/json";
+
+  const res = await fetch(API + path, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body ? JSON.stringify(body) : null
+  });
+
+  if (res.status === 401) { await logout(); throw new Error("session expired"); }
+
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+
+  // The API answers errors as {message, error_code}; FastAPI's own validation
+  // errors still use {detail}.
+  if (!res.ok) {
+    throw new Error(data?.message || data?.detail || `request failed (${res.status})`);
+  }
+  return data;
+}
+
+/* ---------------- screens ---------------- */
+
+function show(which) {
+  for (const id of ["landing", "formwrap", "app"]) $(id).classList.add("hidden");
+  $(which).classList.remove("hidden");
+}
+
+function goHome() {
+  $("formerr").textContent = "";
+  me ? enterApp() : show("landing");
+}
+
+function setUser(u) {
+  me = u;
+  $("who").textContent = u ? (u.username || u.email || "") : "";
+  $("authbtns").classList.toggle("hidden", !!u);
+  $("logoutbtn").classList.toggle("hidden", !u);
+}
+
+async function logout() {
+  try {
+    await fetch(`${API}/auth/logout`, {method: "POST", credentials: "same-origin"});
+  } catch { /* clear the UI regardless */ }
+
+  current = null;
+  if (ws) { ws.close(); ws = null; wsChan = null; }
+  setUser(null);
+  show("landing");
+}
+
+/* ---------------- forms ---------------- */
+
+let formMode = null;
+
+function showForm(mode) {
+  if ((mode === "create" || mode === "join") && !me) {
+    formMode = "login";
+    renderForm("login", "you need an account first");
+    show("formwrap");
+    return;
+  }
+  formMode = mode;
+  renderForm(mode, "");
+  show("formwrap");
+}
+
+function renderForm(mode, err) {
+  const fields = {
+    login:    ["email", "password"],
+    register: ["username", "email", "password"],
+    create:   ["number", "title", "desc"],
+    join:     ["number"],
+  }[mode];
+
+  for (const f of ["username","email","password","number","title","desc"])
+    $("f-" + f).classList.toggle("hidden", !fields.includes(f));
+
+  $("formtitle").textContent = {
+    login: "log in", register: "create an account",
+    create: "create a channel", join: "ask to join a channel",
+  }[mode];
+
+  $("formsubmit").textContent = mode === "join" ? "send request" : mode;
+  $("formerr").textContent = err;
+}
+
+$("formsubmit").onclick = async () => {
+  $("formerr").textContent = "";
+  try {
+    if (formMode === "register") {
+      await api("/auth/create", {method:"POST", body:{
+        username: $("i-username").value,
+        email:    $("i-email").value,
+        password: $("i-password").value,
+      }});
+      formMode = "login";
+      renderForm("login", "");
+      toast("account created — now log in");
+      return;
+    }
+
+    if (formMode === "login") {
+      const d = await api("/auth/login", {method:"POST", body:{
+        email: $("i-email").value, password: $("i-password").value,
+      }});
+      setUser(d.user || {email: $("i-email").value});
+      toast("logged in");
+      return enterApp();
+    }
+
+    if (formMode === "create") {
+      const n = parseInt($("i-number").value, 10);
+      await api("/chat/create", {method:"POST", body:{
+        channel_number: n,
+        channel_title: $("i-title").value,
+        channel_description: $("i-desc").value,
+      }});
+      toast(`channel ${n} created`);
+      await enterApp();
+      return openChat(n);
+    }
+
+    if (formMode === "join") {
+      const n = parseInt($("i-number").value, 10);
+      await api("/requests", {method:"POST", body:{chat_uid: n}});
+      toast("request sent");
+      await enterApp();
+      return openChat(n);
+    }
+  } catch (e) {
+    $("formerr").textContent = e.message;
+    toast(e.message, false);
+  }
+};
+
+/* ---------------- app ---------------- */
+
+async function enterApp() {
+  show("app");
+  await loadChats();
+}
+
+async function loadChats() {
+  chats = await api("/chat/mine");
+
+  const row = (c, pending) => `
+    <div class="chatitem ${current === c.number ? "active" : ""}" onclick="openChat(${c.number})">
+      <span>${escape(c.title)}</span>
+      <span>
+        ${pending ? '<span class="tag">pending</span> ' : ""}
+        ${c.is_owner ? '<span class="tag">owner</span> ' : ""}
+        <span class="num">#${c.number}</span>
+      </span>
+    </div>`;
+
+  $("memberlist").innerHTML  = chats.member.map(c => row(c, false)).join("")
+                            || '<div class="sys" style="padding:6px 10px">none yet</div>';
+  $("pendinglist").innerHTML = chats.pending.map(c => row(c, true)).join("")
+                            || '<div class="sys" style="padding:6px 10px">none</div>';
+}
+
+function isMember(n) { return chats.member.some(c => c.number === n); }
+function isOwner(n)  { return chats.member.some(c => c.number === n && c.is_owner); }
+
+async function openChat(n) {
+  const switching = current !== n;
+  current = n;
+  await loadChats();
+
+  const info = [...chats.member, ...chats.pending].find(c => c.number === n);
+  $("chattitle").textContent = info ? info.title : "channel " + n;
+  $("chatsub").textContent   = "#" + n;
+
+  const member = isMember(n);
+  $("composer").classList.toggle("hidden", !member);
+  $("readonly").classList.toggle("hidden", member);
+  $("reqbtn").classList.toggle("hidden", !isOwner(n));
+  $("delbtn").classList.toggle("hidden", !isOwner(n));
+
+  if (!switching && ws && ws.readyState === 1 && wsChan === n) return;
+
+  $("log").innerHTML = "";
+  messages = new Map();
+
+  try {
+    const history = await api(`/chat/${n}/messages`);
+    if (Array.isArray(history)) history.forEach(addMsg);
+  } catch (e) {
+    addSys(e.message);
+  }
+
+  connect(n);
+}
+
+function connect(n) {
+  if (ws) ws.close();
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}${API}/chat/${n}`);
+  wsChan = n;
+
+  ws.onopen  = () => addSys("connected");
+  ws.onclose = () => addSys("disconnected");
+
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.error) return addSys(d.error);
+    if (d.type === "reaction") return applyReaction(d);
+    addMsg(d);
+  };
+}
+
+/* ---------------- composer ---------------- */
+
+function msgKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+function autoGrow(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 140) + "px";
+}
+
+function send() {
+  const box = $("i-msg");
+  const text = box.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({message: text}));
+  box.value = "";
+  autoGrow(box);
+}
+
+async function requestCurrent() {
+  try {
+    await api("/requests", {method:"POST", body:{chat_uid: current}});
+    await loadChats();
+    toast("request sent");
+  } catch (e) { toast(e.message, false); }
+}
+
+async function deleteChannel() {
+  if (!confirm(`Delete channel ${current}? All its messages go with it.`)) return;
+  try {
+    await api(`/chat/${current}`, {method:"DELETE"});
+    toast(`channel ${current} deleted`);
+    if (ws) { ws.close(); ws = null; wsChan = null; }
+    current = null;
+    $("chattitle").textContent = "no channel selected";
+    $("chatsub").textContent = "";
+    $("log").innerHTML = "";
+    $("composer").classList.add("hidden");
+    $("readonly").classList.add("hidden");
+    $("reqbtn").classList.add("hidden");
+    $("delbtn").classList.add("hidden");
+    await loadChats();
+  } catch (e) { toast(e.message, false); }
+}
+
+/* ---------------- messages + reactions ---------------- */
+
+function addMsg(m) {
+  // Messages arriving over the socket carry the same shape as the history.
+  const uid = m.message_uid;
+
+  const el = document.createElement("div");
+  el.className = "msg";
+  if (uid) el.dataset.uid = uid;
+
+  // No newlines between tags: any whitespace here would render inside the message.
+  el.innerHTML =
+    `<div class="msgtop">` +
+      `<span class="who">${escape(m.username || "anon")}</span>` +
+      `<span class="text">${escape(m.message)}</span>` +
+      `<span class="time" title="${escape(fmtFull(m.sent_at))}">${escape(fmtTime(m.sent_at))}</span>` +
+      `<span class="reactbar"></span>` +
+    `</div>` +
+    `<div class="chips"></div>`;
+
+  $("log").appendChild(el);
+
+  if (uid) {
+    messages.set(uid, {
+      reactions: {...(m.reactions || {})},
+      mine: new Set(m.my_reactions || []),
+    });
+    buildReactBar(uid);
+    updateChips(uid);
+  }
+
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function addSys(text) {
+  const d = document.createElement("div");
+  d.className = "msg sys";
+  d.textContent = text;
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function msgEl(uid) {
+  return $("log").querySelector(`.msg[data-uid="${uid}"]`);
+}
+
+/* The hover bar: four buttons, only for members. */
+function buildReactBar(uid) {
+  const el = msgEl(uid);
+  if (!el) return;
+
+  const bar = el.querySelector(".reactbar");
+  if (!isMember(current)) { bar.innerHTML = ""; return; }
+
+  bar.innerHTML = Object.entries(EMOJI)
+    .map(([key, glyph]) =>
+      `<button class="react" title="${key}" onclick="toggleReaction('${uid}','${key}')">${glyph}</button>`)
+    .join("");
+}
+
+/* The chips under a message: one per emoji that has at least one reaction. */
+function updateChips(uid) {
+  const el = msgEl(uid);
+  if (!el) return;
+
+  const state = messages.get(uid);
+  const chips = el.querySelector(".chips");
+
+  const html = Object.entries(EMOJI)
+    .filter(([key]) => (state.reactions[key] || 0) > 0)
+    .map(([key, glyph]) => {
+      const n = state.reactions[key];
+      const mine = state.mine.has(key) ? " mine" : "";
+      const clickable = isMember(current);
+      return `<button class="chip${mine}" ${clickable ? "" : "disabled"}
+               onclick="toggleReaction('${uid}','${key}')">${glyph} ${n}</button>`;
+    })
+    .join("");
+
+  chips.innerHTML = html;
+  chips.classList.toggle("empty", html === "");
+}
+
+async function toggleReaction(uid, key) {
+  try {
+    // Query-parameter form, matching the current route. If you switch the
+    // route to a body schema, use:
+    //   api(`/chat/reaction/${uid}`, {method:"POST", body:{reaction_type:key}})
+    await api(`/chat/reaction/${uid}?reaction_type=${key}`, {method: "POST"});
+    // No optimistic update — the server broadcasts to everyone including us,
+    // so the socket event below is what moves the UI.
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
+function applyReaction(d) {
+  const state = messages.get(d.message_uid);
+  if (!state) return;   // a message not currently on screen
+
+  const key = d.reaction_type;
+
+  if (d.action === "added") {
+    state.reactions[key] = (state.reactions[key] || 0) + 1;
+    if (me && d.user_uid === me.user_uid) state.mine.add(key);
+  } else {
+    state.reactions[key] = Math.max(0, (state.reactions[key] || 1) - 1);
+    if (state.reactions[key] === 0) delete state.reactions[key];
+    if (me && d.user_uid === me.user_uid) state.mine.delete(key);
+  }
+
+  updateChips(d.message_uid);
+}
+
+/* ---------------- requests modal ---------------- */
+
+async function openRequests() {
+  $("modal").classList.remove("hidden");
+  $("reqerr").textContent = "";
+  $("reqlist").innerHTML = '<div class="sys">loading…</div>';
+
+  let list;
+  try {
+    list = await api(`/requests/${current}`);
+  } catch (e) {
+    $("reqlist").innerHTML = "";
+    $("reqerr").textContent = e.message;
+    return;
+  }
+
+  if (!list || list.length === 0) {
+    $("reqlist").innerHTML = '<div class="sys">nothing pending</div>';
+    return;
+  }
+
+  $("reqlist").innerHTML = list.map(r => `
+    <div class="reqrow">
+      <span>${escape(r.username)}</span>
+      <span>
+        <button onclick="resolve('${r.request_uid}', true)">accept</button>
+        <button class="ghost" onclick="resolve('${r.request_uid}', false)">decline</button>
+      </span>
+    </div>`).join("");
+}
+
+function closeRequests() { $("modal").classList.add("hidden"); }
+
+async function resolve(requestUid, accept) {
+  $("reqerr").textContent = "";
+  try {
+    await api(`/requests/${accept ? "accept" : "decline"}/${requestUid}`, {method:"POST"});
+    toast(accept ? "request accepted" : "request declined");
+    await openRequests();
+    await loadChats();
+  } catch (e) {
+    $("reqerr").textContent = e.message;
+    toast(e.message, false);
+  }
+}
+
+/* ---------------- boot ---------------- */
+
+/*
+  We can't read the cookie from JavaScript, so "am I logged in?" is a question
+  only the server can answer. A raw fetch is used here rather than api(),
+  because a 401 during boot is the normal logged-out case, not an error.
+*/
+async function boot() {
+  try {
+    const res = await fetch(`${API}/auth/me`, {credentials: "same-origin"});
+    if (!res.ok) throw new Error("logged out");
+
+    const data = await res.json();
+    if (!data) throw new Error("logged out");
+
+    setUser(data);
+    await enterApp();
+  } catch {
+    setUser(null);
+    show("landing");
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
