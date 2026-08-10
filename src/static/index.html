@@ -108,7 +108,7 @@
 */
 const API = "/api/v1";
 
-/* If your enum still spells it "rolf", rename the key below to match. */
+/* Key names must match the ReactionType enum in models.py exactly. */
 const EMOJI = { rolf: "🤣", joy: "😂", skull: "💀", heart: "❤️" };
 
 /* Timestamps are stored naive but generated inside the container, which runs
@@ -121,6 +121,7 @@ let current  = null;   // channel number currently open
 let ws       = null;
 let wsChan   = null;   // channel the socket is actually connected to
 let messages = new Map();   // message_uid -> {reactions: {...}, mine: Set}
+let wsRetry  = 0;      // consecutive failed reconnects, for the backoff
 
 /* ---------------- helpers ---------------- */
 
@@ -159,7 +160,28 @@ function toast(text, ok = true) {
 
 /* ---------------- api ---------------- */
 
-async function api(path, {method="GET", body=null} = {}) {
+/*
+  The access token lasts 15 minutes. When it expires, one request comes back
+  401 — we swap it for a fresh one using the refresh cookie and retry, instead
+  of throwing the user out.
+*/
+let refreshing = null;
+
+async function tryRefresh() {
+  // One shared promise: five simultaneous 401s cause one refresh, not five.
+  if (!refreshing) {
+    refreshing = fetch(`${API}/auth/refresh`, {
+      method: "POST",
+      credentials: "same-origin",
+    })
+      .then(r => r.ok)
+      .catch(() => false)
+      .finally(() => { refreshing = null; });
+  }
+  return refreshing;
+}
+
+async function api(path, {method="GET", body=null, _retry=false} = {}) {
   const headers = {};
   if (body) headers["Content-Type"] = "application/json";
 
@@ -170,7 +192,15 @@ async function api(path, {method="GET", body=null} = {}) {
     body: body ? JSON.stringify(body) : null
   });
 
-  if (res.status === 401) { await logout(); throw new Error("session expired"); }
+  if (res.status === 401) {
+    // _retry stops an infinite loop; /auth/ is excluded so we never try to
+    // refresh the refresh.
+    if (!_retry && !path.startsWith("/auth/") && await tryRefresh()) {
+      return api(path, {method, body, _retry: true});
+    }
+    await logout();
+    throw new Error("session expired");
+  }
 
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
@@ -208,7 +238,8 @@ async function logout() {
   } catch { /* clear the UI regardless */ }
 
   current = null;
-  if (ws) { ws.close(); ws = null; wsChan = null; }
+  wsRetry = 0;
+  if (ws) { ws.onclose = null; ws.close(); ws = null; wsChan = null; }
   setUser(null);
   show("landing");
 }
@@ -358,13 +389,28 @@ async function openChat(n) {
 }
 
 function connect(n) {
-  if (ws) ws.close();
+  // Clearing onclose first: an intentional close must not trigger a reconnect
+  // to the channel we are leaving.
+  if (ws) { ws.onclose = null; ws.close(); }
+
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}${API}/chat/${n}`);
   wsChan = n;
 
-  ws.onopen  = () => addSys("connected");
-  ws.onclose = () => addSys("disconnected");
+  ws.onopen = () => { wsRetry = 0; addSys("connected"); };
+
+  ws.onclose = async () => {
+    if (current !== n || !me) return;      // we left the channel, or logged out
+
+    addSys("disconnected — reconnecting");
+
+    // The socket may have died because the cookie expired.
+    await tryRefresh();
+
+    const delay = Math.min(1000 * 2 ** wsRetry, 15000);   // 1s, 2s, 4s ... 15s
+    wsRetry++;
+    setTimeout(() => { if (current === n) connect(n); }, delay);
+  };
 
   ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
