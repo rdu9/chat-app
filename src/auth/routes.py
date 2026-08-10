@@ -10,6 +10,8 @@ import uuid
 from src.auth.dependencies import current_user_uid
 from src.config import Config
 from src.errors import InvalidCredentials, NotAuthenticated, InvalidToken, UserNotFound
+from starlette.concurrency import run_in_threadpool
+
 
 auth_router = APIRouter()
 user_service = UserService()
@@ -59,8 +61,8 @@ async def login_user(
 
     user_password = payload.password
     hashed_password = check_user.password_hash
-    valid = verify_password(user_password, hashed_password)
-
+    valid = await run_in_threadpool(verify_password, user_password, hashed_password)
+    
     if not valid:
         raise InvalidCredentials()
 

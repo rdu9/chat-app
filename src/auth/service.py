@@ -16,6 +16,7 @@ from src.errors import (
     NotChatMember,
     AlreadyChatMember,
 )
+from starlette.concurrency import run_in_threadpool
 
 
 class UserService:
@@ -28,9 +29,8 @@ class UserService:
         user_model_dict = payload.model_dump()
         new_user = User(**user_model_dict)
 
-        user_password = payload.password
-        hashed_password = generate_passwd_hash(user_password)
-        new_user.password_hash = hashed_password
+        hashed = await run_in_threadpool(generate_passwd_hash, payload.password)
+        new_user.password_hash = hashed
 
         session.add(new_user)
         await session.commit()
