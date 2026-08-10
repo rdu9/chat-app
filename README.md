@@ -141,3 +141,14 @@ With the loop now unblocked, hundreds of registrations ran at the same time, eac
 
 The interesting part is that it was actually *worse* here: with only one core, 30 hashes finish no sooner than 30 sequential ones, but each holds a connection 30 times longer.
 
+## Known limitations
+  
+- **No rate limiting implemented yet.**.
+- **No tests.** Every bug in this project was found by clicking.
+- **No indexes** beyond primary keys and constraints.
+- **Refresh tokens aren't rotated or revocable.** 
+- **No backups.** Hosted on one digitalocean droplet, one volume.
+- **No monitoring.** Nothing alerts me when it's down.
+
+
+NOTE: The frontend is deliberately minimal: one HTML file. This is a backend project, and the UI exists just to showcase the API.
