@@ -7,8 +7,10 @@ very simple frontend to showcase the app.
 
 **FastAPI · PostgreSQL · Redis pub/sub · WebSockets · Docker · nginx · Cloudflare**
 
-**Live demo:** [https://discord2.xyz](https://discord2.xyz)
- 
+**Live demo + full video showcase** 
+
+[https://discord2.xyz](https://discord2.xyz)
+
 https://github.com/user-attachments/assets/f51d26a1-6d06-46cf-93bc-c23b9e0d415f
 
 ---
