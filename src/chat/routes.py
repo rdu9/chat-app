@@ -10,7 +10,9 @@ import asyncio
 from .service import ChatService
 from src.auth.utils import decode_token
 from .schemas import SendMessageModel, CreateChannelModel
-from src.db.models import ReactionType
+from src.db.models import Message
+from sqlmodel import select
+from src.db.models import ReactionType,Request,Chat,User, RequestStatus
 from sqlalchemy import func
 from src.db.models import Reaction
 from src.errors import (
@@ -59,7 +61,6 @@ async def send_a_message(
         chat_uid=chat_uid, user_uid=user_uid, text=message, session=session
     )
     return response
-
 
 @chat_router.delete("/{channel_id}", status_code=status.HTTP_200_OK)
 async def delete_channel(
@@ -142,17 +143,6 @@ async def chat_websocket(websocket: WebSocket, channel_id: int):
         forwarder.cancel()
         await pubsub.unsubscribe(f"channel:{channel_id}")
         await pubsub.aclose()
-
-
-# -----------------
-
-
-from src.db.models import User, Chat, Message, ChatUserLink, Request, RequestStatus
-import json
-from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select
-import uuid
-from src.db.redis import redis_client
 
 PAGE = """
 <!doctype html>
