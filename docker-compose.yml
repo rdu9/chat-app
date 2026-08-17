@@ -1,8 +1,31 @@
 
 services:
+
+  app:
+    build: .
+    restart: unless-stopped
+    mem_limit: 400m
+    memswap_limit: 400m
+    cpus: 0.8
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    logging:
+     driver: "json-file"
+     options:
+      max-size: "10m"
+      max-file: "3"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+   
   db:
     image: postgres:17
     restart: unless-stopped
+    mem_limit: 300m
+    cpus: 0.5
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -39,23 +62,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
- 
-  app:
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "127.0.0.1:8000:8000"
-    logging:
-     driver: "json-file"
-     options:
-      max-size: "10m"
-      max-file: "3"
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
  
 volumes:
   pgdata:
